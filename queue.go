@@ -2,7 +2,14 @@ package workqueue
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
+	"time"
+)
+
+const (
+	// Pretty much a radndom number
+	defNumWorkersPerCore = 8
 )
 
 type Job interface{}
@@ -16,21 +23,30 @@ type WorkQueueOptions struct {
 type WorkQueue struct {
 	Options WorkQueueOptions
 
-	mutex      sync.Mutex
-	started    bool
-	stopping   bool
-	jobQueue   chan Job
-	dispatcher *dispatcher
-	workers    []*worker
+	mutex    sync.Mutex
+	started  bool
+	stopping bool
+	jobQueue jobQueue
+	workers  []*worker
 }
 
 func New(id string, maxWorkers int, workerFn func(Job)) *WorkQueue {
-	return &WorkQueue{
-		Options: WorkQueueOptions{
-			MaxWorkers: maxWorkers,
-			WorkerFn:   workerFn,
-		},
+	return NewWithOptions(&WorkQueueOptions{
+		Id:         id,
+		MaxWorkers: maxWorkers,
+		WorkerFn:   workerFn,
+	})
+}
+
+func NewWithOptions(options *WorkQueueOptions) *WorkQueue {
+	q := &WorkQueue{
+		Options: *options,
 	}
+	if q.Options.MaxWorkers <= 0 {
+		ncores := runtime.GOMAXPROCS(-1)
+		q.Options.MaxWorkers = defNumWorkersPerCore * ncores
+	}
+	return q
 }
 
 func (q *WorkQueue) Start() error {
@@ -41,18 +57,14 @@ func (q *WorkQueue) Start() error {
 		return QueueIsStarted
 	}
 
-	q.jobQueue = make(chan Job)
-
-	dispatcherId := fmt.Sprintf("%s-dispatcher", q.Options.Id)
-	q.dispatcher = newDispatcher(dispatcherId, q.Options.MaxWorkers)
-	workerPool := q.dispatcher.Start(q.jobQueue)
+	q.jobQueue = newJobListQueue()
 
 	q.workers = make([]*worker, q.Options.MaxWorkers)
 	for i := 0; i < len(q.workers); i++ {
 		workerId := fmt.Sprintf("%s-worker-%d", q.Options.Id, i)
 		worker := newWorker(workerId, q.Options.WorkerFn)
 		q.workers[i] = worker
-		worker.Start(workerPool)
+		worker.Start(q.jobQueue)
 	}
 
 	q.started = true
@@ -71,16 +83,17 @@ func (q *WorkQueue) Stop(waitForPendingJobs bool) error {
 	}
 
 	if waitForPendingJobs {
-		q.dispatcher.Drain()
+		// XXX Monitor the progress and update sleep time accordingly.
+		for !q.jobQueue.Empty() {
+			time.Sleep(300 * time.Millisecond)
+		}
 	}
 
 	// Stop the workers and the dispatcher
+	q.jobQueue.AbortWaiters(true)
 	for i := 0; i < len(q.workers); i++ {
 		q.workers[i].Stop()
 	}
-	q.dispatcher.Stop()
-	// Now it's safe to close the job queue channel
-	close(q.jobQueue)
 
 	// Done
 	_, _ = q.withSafeCtx(func() (interface{}, error) {
@@ -93,7 +106,7 @@ func (q *WorkQueue) Stop(waitForPendingJobs bool) error {
 
 func (q *WorkQueue) Add(j Job) error {
 	_, err := q.withRunningQueue(func() (interface{}, error) {
-		q.jobQueue <- j
+		q.jobQueue.Push(j)
 		return nil, nil
 	})
 

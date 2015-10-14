@@ -1,13 +1,14 @@
 package workqueue
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type worker struct {
-	Id         string
-	WorkerFn   func(Job)
-	jobChannel chan Job
-	done       chan struct{}
-	running    bool
+	Id       string
+	WorkerFn func(Job)
+	quit     chan struct{}
 }
 
 func newWorker(id string, workerFn func(Job)) *worker {
@@ -17,29 +18,18 @@ func newWorker(id string, workerFn func(Job)) *worker {
 	}
 }
 
-func (w *worker) loop(workerPool chan<- chan<- Job) {
-	defer func() {
-		close(w.done)
-	}()
-
+func (w *worker) loop(jq jobQueue) {
 	for {
-		fmt.Println("worker %s submitting job channel", w.Id)
 		select {
-		case workerPool <- w.jobChannel:
-			fmt.Println("worker %s waiting for a job", w.Id)
-			select {
-			case job := <-w.jobChannel:
-				fmt.Println("worker %s got a job", w.Id)
-				w.execute(job)
-
-			case <-w.done:
-				fmt.Printf("worker-%s: is done\n", w.Id)
-				return
-			}
-
-		case <-w.done:
-			fmt.Printf("worker-%s: is done\n", w.Id)
+		case <-w.quit:
 			return
+
+		default:
+			if job, ok := jq.WaitForJob(); ok {
+				w.execute(job)
+			} else {
+				time.Sleep(5 * time.Millisecond) // XXX
+			}
 		}
 	}
 }
@@ -54,27 +44,12 @@ func (w worker) execute(j Job) {
 	w.WorkerFn(j)
 }
 
-func (w *worker) Start(workerPool chan<- chan<- Job) {
-	w.jobChannel = make(chan Job)
-	w.done = make(chan struct{})
-
-	go w.loop(workerPool)
+func (w *worker) Start(jq jobQueue) {
+	w.quit = make(chan struct{})
+	go w.loop(jq)
 }
 
+// The method blocks until the waiters of worker's job queue are aborted
 func (w *worker) Stop() {
-	w.stopLoop()
-	close(w.jobChannel)
-}
-
-func (w *worker) stopLoop() {
-	// If the main loop is still running, we get blocked until it reads from
-	// the done channel.
-	// If the main loop is not running, w.done object should be closed and
-	// our code will panic.
-	defer func() {
-		fmt.Println("worker %s paniced during stopLoop()", w.Id)
-		_ = recover()
-	}()
-	w.done <- struct{}{}
-	fmt.Println("worker %s stopped a loop OK", w.Id)
+	w.quit <- struct{}{}
 }

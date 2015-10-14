@@ -7,97 +7,100 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-func TestWorkerRegisterItselfToPool(t *testing.T) {
-	RegisterTestingT(t)
-
-	w := newWorker("1", func(j Job) {})
-
-	workerpool := make(chan chan<- Job)
-	defer close(workerpool)
-	w.Start(workerpool)
-	defer w.Stop()
-
-	Eventually(workerpool).Should(Receive())
-}
-
 func TestWorkerPerformsJobs(t *testing.T) {
 	RegisterTestingT(t)
 
 	counter := 0
-	w := newWorker("2", func(j Job) {
+	w := newWorker("perform", func(j Job) {
 		counter++
 	})
 
-	workerpool := make(chan chan<- Job)
-	defer close(workerpool)
-	w.Start(workerpool)
-	defer w.Stop()
+	jq := newJobListQueue()
+	w.Start(jq)
+	defer func() {
+		jq.AbortWaiters(true)
+		w.Stop()
+	}()
 
 	{
-		workerC := <-workerpool
-		workerC <- struct{}{}
+		jq.Push(struct{}{})
 		Eventually(func() int { return counter }).Should(Equal(1))
 	}
 	{
-		workerC := <-workerpool
-		workerC <- struct{}{}
+		jq.Push(struct{}{})
 		Eventually(func() int { return counter }).Should(Equal(2))
 	}
 	{
-		workerC := <-workerpool
-		workerC <- struct{}{}
+		jq.Push(struct{}{})
 		Eventually(func() int { return counter }).Should(Equal(3))
 	}
+}
+
+func TestWorkerStop(t *testing.T) {
+	RegisterTestingT(t)
+
+	counter := 0
+	w := newWorker("stop", func(j Job) {
+		counter++
+	})
+
+	jq := newJobListQueue()
+	w.Start(jq)
+
+	jq.AbortWaiters(true)
+	w.Stop()
+
+	jq.Push(struct{}{})
+	Eventually(func() int { return counter }).ShouldNot(Equal(1))
+	Eventually(func() bool { return jq.Empty() }).ShouldNot(BeTrue())
 }
 
 func TestWorkerWorkerFnPanics(t *testing.T) {
 	RegisterTestingT(t)
 
-	w := newWorker("3", func(j Job) {
+	w := newWorker("panic", func(j Job) {
 		panic("AAAA")
 	})
 
-	workerpool := make(chan chan<- Job)
-	defer close(workerpool)
-	w.Start(workerpool)
-	defer w.Stop()
-
-	{
-		workerC := <-workerpool
-		workerC <- struct{}{}
-	}
-}
-
-func TestWorkerPoolIsClosed(t *testing.T) {
-	RegisterTestingT(t)
-
-	w := newWorker("4", func(j Job) {
-		time.Sleep(10 * time.Millisecond)
-	})
-
-	workerpool := make(chan chan<- Job)
-
-	go func() {
-		/* Undefined behaviour. In some cases it would throw an
-		 * exception when it will try to write to a workerpool channel
-		 * that is closed at that moment. But in some execution
-		 * scenarios it migth exit gracefully.
-		 */
-		defer func() {
-			_ = recover()
-		}()
-
-		w.jobChannel = make(chan Job)
-		w.done = make(chan struct{})
-		w.loop(workerpool)
+	jq := newJobListQueue()
+	w.Start(jq)
+	defer func() {
+		jq.AbortWaiters(true)
+		w.Stop()
 	}()
 
-	workerC := <-workerpool
-	close(workerpool)
-	workerC <- struct{}{}
+	jq.Push(struct{}{})
+	Eventually(func() bool { return jq.Empty() }).Should(BeTrue())
+}
 
-	// The sleep is needed to increase the probability of main worker loop to
-	// panic
-	time.Sleep(100 * time.Millisecond)
-	w.Stop()
+func TestWorkerJobQueueWaitingIsAbortedThenResumed(t *testing.T) {
+	RegisterTestingT(t)
+
+	counter := 0
+	w := newWorker("aborted-resumed", func(j Job) {
+		time.Sleep(3 * time.Millisecond)
+		counter++
+	})
+
+	jq := newJobListQueue()
+	w.Start(jq)
+	defer func() {
+		jq.AbortWaiters(true)
+		w.Stop()
+	}()
+
+	jq.Push(struct{}{})
+	Eventually(func() int { return counter }).Should(Equal(1))
+	Eventually(func() bool { return jq.Empty() }).Should(BeTrue())
+
+	jq.AbortWaiters(true)
+	jq.Push(struct{}{})
+	jq.Push(struct{}{})
+	time.Sleep(10 * time.Millisecond)
+	Eventually(func() int { return counter }).Should(Equal(1))
+	Eventually(func() bool { return jq.Empty() }).Should(BeFalse())
+
+	jq.AbortWaiters(false)
+	Eventually(func() int { return counter }).Should(Equal(3))
+	Eventually(func() bool { return jq.Empty() }).Should(BeTrue())
 }
