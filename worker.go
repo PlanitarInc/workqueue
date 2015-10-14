@@ -2,6 +2,7 @@ package workqueue
 
 import (
 	"fmt"
+	"runtime/debug"
 	"time"
 )
 
@@ -37,7 +38,7 @@ func (w *worker) loop(jq jobQueue) {
 func (w worker) execute(j Job) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("worker-%s: worker fn paniced: %s\n", w.Id, r)
+			fmt.Printf("worker-%s: worker fn paniced: %s: %s\n", w.Id, r, debug.Stack())
 		}
 	}()
 
